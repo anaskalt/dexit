@@ -1,0 +1,6 @@
+tox
+torch
+numpy
+scikit-learn
+matplotlib
+#libp2p-pyrust
