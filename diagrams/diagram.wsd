@@ -1,0 +1,60 @@
+@startuml dexit
+actor Edge #lightblue
+actor Server #lightgreen
+
+participant "Edge Device" as ED #lightblue
+participant "Server" as SV #lightgreen
+participant "P2P Network" as P2P #lightgrey
+
+note over ED, SV: Waiting for peers to connect
+loop wait_for_peers
+    ED -> P2P: Check for peers
+    P2P -> ED: Peers connected?
+    SV -> P2P: Check for peers
+    P2P -> SV: Peers connected?
+end
+
+note right of ED
+  Initialize edge device
+end note
+ED -> ED: Initialize network (P2P)
+ED -> P2P: Publish status READY
+ED -> ED: Set status to READY
+
+note right of SV
+  Initialize server
+end note
+SV -> SV: Initialize network (P2P)
+SV -> P2P: Publish status READY
+SV -> SV: Set status to READY
+
+note right of ED
+  Start inference process
+end note
+Edge -> ED: Start inference process
+loop For each sample
+    ED -> ED: Perform local inference
+    alt exit_taken is True
+        ED -> ED: Continue with next sample
+    else exit_taken is False
+        ED -> ED: Set status to WAITING
+        ED -> P2P: Publish status checking request (READY?)
+        P2P -> SV: Check availability
+        alt Server is READY
+            SV -> P2P: Publish status READY
+            ED -> ED: Send sample to server
+            ED -> SV: Send inference request
+            SV -> SV: Perform inference
+            SV -> SV: Set status to READY
+            SV -> ED: Send inference result
+            ED -> ED: Process result
+            ED -> ED: Set status to DONE
+        else Server is NOT_READY
+            SV -> P2P: Publish status NOT_READY
+            ED -> ED: Wait 10 seconds
+        end
+    end
+end
+ED -> ED: Set status to DONE
+
+@enduml
