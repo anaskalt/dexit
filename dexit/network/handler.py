@@ -19,7 +19,7 @@ from typing import List
 import asyncio
 import libp2p_pyrust as libp2p
 from dexit.utils.operations import Operations
-from dexit.utils.state import Status, PeerStatus, PeerWeights, NetworkState
+from dexit.utils.state import Status, PeerStatus, NetworkState, InferenceRequest, InferenceResult
 
 
 
@@ -34,25 +34,24 @@ class P2PHandler:
         packet_size (int): The size of each packet for breaking down large messages, in bytes.
     """
 
-    def __init__(self, bootnodes, key_path, topic, packet_size=1024):
+    def __init__(self, bootnodes, key_path, topic, edge_device_network, server_network, packet_size=1024, device='cpu'):
         self.bootnodes = bootnodes
         self.key_path = key_path
         self.topic = topic
         self.packet_size = packet_size
+        self.device = device
         self.local_peer_id = None
         self.local_peer_status = None
-        self.local_peer_weights = None
         self.network_state = NetworkState()
         self.message_buffer = bytearray()
         self.is_receiving = False
+        self.edge_device_network = edge_device_network.to(self.device)
+        self.server_network = server_network.to(self.device)
 
     def init_peer_objects(self, peer_id):
-        """Initializes PeerStatus and PeerWeights with corresponding peer ID."""
+        """Initializes PeerStatus with corresponding peer ID."""
         self.local_peer_status = PeerStatus(peer_id, Status.NONE)
         self.network_state.update_peer_status(self.local_peer_status)
-
-        self.local_peer_weights = PeerWeights(peer_id, {})
-        self.network_state.update_peer_weights(self.local_peer_weights)
 
     async def generate_or_load_key(self):
         """
@@ -104,43 +103,67 @@ class P2PHandler:
         serialized_data = operations.serialize(peer_status)
         await self.publish_objects(serialized_data)
 
-    async def publish_weights(self, peer_weights: PeerWeights):
+    async def publish_inference_request(self, inference_request: InferenceRequest):
         """
-        Publishes the peer's model weights to the network. This function serializes the PeerWeights object
-        and publishes it, enabling other peers in the network to receive and utilize these weights for federated learning.
+        Publishes the inference request to the network. This function serializes the InferenceRequest object
+        and publishes it, enabling other peers in the network to receive and process these requests.
 
         Args:
-            peer_weights (PeerWeights): The weights object of the local peer's model.
+            inference_request (InferenceRequest): The request object of the local peer's inference.
         """
         operations = Operations(chunk_size=self.packet_size)
-        serialized_data = operations.serialize(peer_weights)
+        serialized_data = operations.serialize(inference_request)
+        await self.publish_objects(serialized_data)
+
+    async def publish_inference_result(self, inference_result: InferenceResult):
+        """
+        Publishes the inference result to the network. This function serializes the InferenceResult object
+        and publishes it, enabling other peers in the network to receive and utilize these results.
+
+        Args:
+            inference_result (InferenceResult): The result object of the local peer's inference.
+        """
+        operations = Operations(chunk_size=self.packet_size)
+        serialized_data = operations.serialize(inference_result)
         await self.publish_objects(serialized_data)
 
     async def publish_objects(self, serialized_data: List[bytes], delay: float = 0.1):
         """
-        Publishes serialized data objects (PeerWeights or PeerStatus) to the P2P network.
+        Publishes serialized data objects (PeerStatus, InferenceRequest, or InferenceResult) to the P2P network.
 
-        This method serializes the data object (either PeerWeights or PeerStatus) into chunks
+        This method serializes the data object (either PeerStatus, InferenceRequest, or InferenceResult) into chunks
         and publishes each chunk to the network, with 'start' and 'end' flags to denote the sequence.
         It introduces an optional delay between sending chunks to prevent network congestion.
 
         Args:
-            data_object (Union[PeerWeights, PeerStatus]): The data object to be serialized and published.
-            delay (float): Delay in seconds between publishing each chunk to prevent network congestion. Defaults to 0.01.
+            serialized_data (List[bytes]): The serialized data chunks to publish.
+            delay (float): Delay in seconds between publishing each chunk to prevent network congestion. Defaults to 0.1.
         """
-
         await libp2p.publish_message(b'start')
         for chunk in serialized_data:
             await libp2p.publish_message(chunk)
             await asyncio.sleep(delay)
         await libp2p.publish_message(b'end')
 
-    async def subscribe_to_messages(self):
+    '''async def subscribe_to_messages(self):
         def callback_wrapper(message):
             self.message_dispatcher(message)
         
-        await libp2p.subscribe_to_messages(callback_wrapper)
+        await libp2p.subscribe_to_messages(callback_wrapper)'''
 
+    async def subscribe_to_messages(self):
+        def callback_wrapper(message):
+            try:
+                self.message_dispatcher(message)
+            except Exception as e:
+                print(f"Error in message dispatcher: {e}")
+
+        try:
+            await libp2p.subscribe_to_messages(callback_wrapper)
+        except EOFError as e:
+            print(f"EOFError during message subscription: {e}")
+        except Exception as e:
+            print(f"General error during message subscription: {e}")
 
     async def start_listening(self):
         """
@@ -170,16 +193,18 @@ class P2PHandler:
     def process_complete_message(self):
         """
         Processes a complete message after it's fully received, from the initial 'start' signal to the 'end' signal. 
-        This involves deserializing the message into either a PeerStatus or PeerWeights object and updating the 
-        network state accordingly. The method ensures accurate reflection of peer statuses and weights in the 
+        This involves deserializing the message into either a PeerStatus, InferenceRequest, or InferenceResult object and updating the 
+        network state accordingly. The method ensures accurate reflection of peer statuses and results in the 
         network's overall state based on incoming data.
         """
         operations = Operations()
         data_object = operations.deserialize([self.message_buffer])
         if isinstance(data_object, PeerStatus):
             self.handle_peer_status_update(data_object)
-        elif isinstance(data_object, PeerWeights):
-            self.handle_peer_weights_update(data_object)
+        elif isinstance(data_object, InferenceRequest):
+            self.handle_inference_request_update(data_object)
+        elif isinstance(data_object, InferenceResult):
+            self.handle_inference_result_update(data_object)
         self.message_buffer.clear()
 
     def handle_peer_status_update(self, peer_status: PeerStatus):
@@ -191,14 +216,58 @@ class P2PHandler:
         self.network_state.update_peer_status(peer_status)
         print(f"PeerStatus updated for {peer_status.peer_id}: {peer_status.status}")
 
-    def handle_peer_weights_update(self, peer_weights: PeerWeights):
+    def handle_inference_request_update(self, inference_request: InferenceRequest):
         """
-        Manages the update of a peer's model weights. Upon fully receiving and processing a peer weights message, 
-        this function updates the network state with the new weights of the peer. This action is vital for the 
-        federated learning process, allowing the network to collectively improve and refine the shared model based on peer contributions.
+        Handles the update of a peer's inference request. After an inference request message is fully received and processed, 
+        this function triggers the processing of the received sample on the local peer.
         """
-        self.network_state.update_peer_weights(peer_weights)
-        print(f"PeerWeights updated for {peer_weights.peer_id}.")
+        print(f"InferenceRequest received from {inference_request.peer_id}")
+        asyncio.create_task(self.process_inference_request(inference_request))
+        #self.process_inference_request(inference_request)
+
+    def handle_inference_result_update(self, inference_result: InferenceResult):
+        """
+        Manages the update of a peer's inference result. Upon fully receiving and processing an inference result message, 
+        this function updates the network state with the new result of the peer. This action is vital for the 
+        distributed inference process, allowing the network to collectively utilize the results based on peer contributions.
+        """
+        self.network_state.update_inference_result(inference_result)
+        print(f"InferenceResult updated for {inference_result.peer_id}.")
+
+    async def process_inference_request(self, inference_request: InferenceRequest):
+        try:
+            sample = inference_request.sample
+            peer_id = inference_request.peer_id
+
+            print(f"Processing inference request from peer {peer_id}")
+
+            # Perform inference using the server network
+            output = self.server_network(sample)
+            print(f"Server network output shape: {output.shape}")
+
+            # Create an InferenceResult object with the result
+            inference_result = InferenceResult(peer_id=peer_id, result=output)
+
+            # Publish the inference result to the network
+            print(f"Publishing inference result for peer {peer_id}")
+            await self.publish_inference_result(inference_result)
+
+            # Set status to DONE and publish it
+            self.local_peer_status.status = Status.DONE
+            self.network_state.update_peer_status(self.local_peer_status)
+            for _ in range(3):
+                await self.publish_status(self.local_peer_status)
+            await asyncio.sleep(10)
+
+            # Set status back to READY to ensure continuity
+            self.local_peer_status.status = Status.READY
+            self.network_state.update_peer_status(self.local_peer_status)
+            for _ in range(3):
+                await self.publish_status(self.local_peer_status)
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"Error processing inference request: {e}")
+
 
     async def get_peers(self):
         """

@@ -1,5 +1,6 @@
 tox
 torch
+torchvision
 numpy
 scikit-learn
 matplotlib
