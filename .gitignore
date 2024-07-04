@@ -124,4 +124,8 @@ node.key
 # Ignore the entire metrics directory
 /metrics/
 
-.vscode/
+# Ignore dexit/shared/ directory
+dexit/shared/
+
+# Ignore .vscode directory
+.vscode
