@@ -25,9 +25,10 @@ class Status(Enum):
 
 class PeerStatus:
     """Represents a single peer's status."""
-    def __init__(self, peer_id: str, status: Status):
+    def __init__(self, peer_id: str, status: Status, role: str):
         self._peer_id = peer_id
         self._status = status
+        self._role = role
 
     @property
     def peer_id(self) -> str:
@@ -48,6 +49,16 @@ class PeerStatus:
     def status(self, value: Status):
         """Sets the peer's status."""
         self._status = value
+
+    @property
+    def role(self) -> str:
+        """Gets the peer's role."""
+        return self._role
+
+    @role.setter
+    def role(self, value: str):
+        """Sets the peer's role."""
+        self._role = value
 
 class InferenceRequest:
     """Represents an inference request with a sample."""
@@ -107,10 +118,20 @@ class NetworkState:
     def __init__(self):
         self.peer_statuses = {}
         self.inference_results = {}
+        self.inference_requests = []
 
     def update_peer_status(self, peer_status_info: PeerStatus):
-        """Updates or adds the status of a peer."""
-        self.peer_statuses[peer_status_info.peer_id] = peer_status_info.status
+        """Updates or adds the status and the role of a peer."""
+        self.peer_statuses[peer_status_info.peer_id] = {
+            'status': peer_status_info.status,
+            'role': peer_status_info.role
+        }
+
+    def get_peer_by_role(self, role: str) -> str:
+        for peer_id, info in self.peer_statuses.items():
+            if info['role'] == role:
+                return peer_id
+        return None
 
     def remove_peer(self, peer_id: str):
         """Removes a peer from the network state."""
@@ -126,6 +147,15 @@ class NetworkState:
         """Updates or adds an inference result of a peer."""
         self.inference_results[result.peer_id] = result.result
 
+    def get_inference_result(self, peer_id: str):
+        return self.inference_results.get(peer_id)
+
+    def update_inference_request(self, request: InferenceRequest):
+        self.inference_requests.append(request)
+
+    def get_inference_request(self):
+        return self.inference_requests.pop(0) if self.inference_requests else None
+
     def check_state(self, *states) -> bool:
         """Checks if all peers are in any of the specified states.
         
@@ -139,12 +169,19 @@ class NetworkState:
 
     def get_network_summary(self) -> dict:
         """Returns a summary of the network state."""
-        statuses_summary = {peer_id: status.name for peer_id, status in self.peer_statuses.items()}
         return {
-            "statuses": statuses_summary,
+            "statuses": {peer_id: info['status'].name for peer_id, info in self.peer_statuses.items()},
+            "roles": {peer_id: info['role'] for peer_id, info in self.peer_statuses.items()},
             "inference_results": self.inference_results
         }
 
+    '''def get_network_summary(self) -> dict:
+        return {
+            "statuses": {peer_id: info['status'].name for peer_id, info in self.peer_statuses.items()},
+            "roles": {peer_id: info['role'] for peer_id, info in self.peer_statuses.items()},
+            "inference_results": self.inference_results
+        }'''
+    
     def get_all_results(self) -> dict:
         """Returns the inference results of all peers."""
         return self.inference_results.copy()

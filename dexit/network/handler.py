@@ -16,11 +16,13 @@ Example:
 """
 
 from typing import List
+import logging
 import asyncio
 import libp2p_pyrust as libp2p
 from dexit.utils.operations import Operations
 from dexit.utils.state import Status, PeerStatus, NetworkState, InferenceRequest, InferenceResult
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class P2PHandler:
@@ -34,7 +36,7 @@ class P2PHandler:
         packet_size (int): The size of each packet for breaking down large messages, in bytes.
     """
 
-    def __init__(self, bootnodes, key_path, topic, edge_device_network, server_network, packet_size=1024, device='cpu'):
+    def __init__(self, bootnodes, key_path, topic, models, packet_size=1024, device='cpu', role=None):
         self.bootnodes = bootnodes
         self.key_path = key_path
         self.topic = topic
@@ -45,12 +47,15 @@ class P2PHandler:
         self.network_state = NetworkState()
         self.message_buffer = bytearray()
         self.is_receiving = False
-        self.edge_device_network = edge_device_network.to(self.device)
-        self.server_network = server_network.to(self.device)
+        self.models = models
+        self.operations = Operations(chunk_size=self.packet_size)
+        self.inference_requests = []
+        self.inference_results = {}
+        self.role = role 
 
     def init_peer_objects(self, peer_id):
         """Initializes PeerStatus with corresponding peer ID."""
-        self.local_peer_status = PeerStatus(peer_id, Status.NONE)
+        self.local_peer_status = PeerStatus(peer_id, Status.NONE, self.role)
         self.network_state.update_peer_status(self.local_peer_status)
 
     async def generate_or_load_key(self):
@@ -73,6 +78,7 @@ class P2PHandler:
 
         self.local_peer_id = await self.get_local_peer_id()
         self.init_peer_objects(self.local_peer_id)
+        logging.info(f"Network initialized. Local peer ID: {self.local_peer_id}")
 
     async def publish_hello(self):
         """
@@ -99,11 +105,44 @@ class P2PHandler:
         Args:
             peer_status (PeerStatus): The status object of the local peer.
         """
-        operations = Operations(chunk_size=self.packet_size)
-        serialized_data = operations.serialize(peer_status)
+        serialized_data = self.operations.serialize(peer_status)
         await self.publish_objects(serialized_data)
+        logging.info(f"Published status: {peer_status.status}")
 
-    async def publish_inference_request(self, inference_request: InferenceRequest):
+    async def send_direct_message(self, peer_id, serialized_data: List[bytes], delay: float = 0.1):
+        logging.info(f"Sending direct message to {peer_id} (size: {sum(len(chunk) for chunk in serialized_data)} bytes)")
+        await libp2p.send_direct_message(peer_id, b'start')
+        for chunk in serialized_data:
+            await libp2p.send_direct_message(peer_id, chunk)
+            await asyncio.sleep(delay)
+        await libp2p.send_direct_message(peer_id, b'end')
+        logging.debug(f"Sent direct message to {peer_id}")
+
+    async def wait_for_inference_request(self, timeout=60):
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            if self.inference_requests:
+                request = self.inference_requests.pop(0)
+                logging.info(f"Retrieved inference request from {request.peer_id}")
+                return request
+            await asyncio.sleep(0.1)
+        logging.warning(f"Inference request wait timed out after {timeout} seconds")
+        return None
+
+    async def wait_for_inference_result(self, peer_id, timeout=60):
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            if peer_id in self.inference_results:
+                return self.inference_results.pop(peer_id)
+            await asyncio.sleep(0.1)
+        logging.warning(f"Inference result wait timed out after {timeout} seconds")
+        return None
+
+    def get_inference_request(self):
+        print(self.inference_requests.pop(0))
+        return self.inference_requests.pop(0) if self.inference_requests else None
+
+    '''async def publish_inference_request(self, inference_request: InferenceRequest):
         """
         Publishes the inference request to the network. This function serializes the InferenceRequest object
         and publishes it, enabling other peers in the network to receive and process these requests.
@@ -111,11 +150,28 @@ class P2PHandler:
         Args:
             inference_request (InferenceRequest): The request object of the local peer's inference.
         """
-        operations = Operations(chunk_size=self.packet_size)
-        serialized_data = operations.serialize(inference_request)
-        await self.publish_objects(serialized_data)
+        serialized_data = self.operations.serialize(inference_request)
+        await self.publish_objects(serialized_data)'''
 
-    async def publish_inference_result(self, inference_result: InferenceResult):
+    async def send_inference_request(self, peer_id: str, inference_request: InferenceRequest):
+        """
+        Sends an inference request to a specific peer using direct messaging.
+        """
+        logging.info(f"Sending inference request to peer {peer_id}")
+        serialized_data = self.operations.serialize(inference_request)
+        await self.send_direct_message(peer_id, serialized_data)
+        logging.info(f"Sent inference request to peer {peer_id}")
+
+    async def send_inference_result(self, peer_id: str, inference_result: InferenceResult):
+        """
+        Sends an inference result to a specific peer using direct messaging.
+        """
+        logging.info(f"Sending inference result to peer {peer_id}")
+        serialized_data = self.operations.serialize(inference_result)
+        await self.send_direct_message(peer_id, serialized_data)
+        logging.info(f"Sending inference result to peer {peer_id}")
+
+    '''async def publish_inference_result(self, inference_result: InferenceResult):
         """
         Publishes the inference result to the network. This function serializes the InferenceResult object
         and publishes it, enabling other peers in the network to receive and utilize these results.
@@ -123,9 +179,8 @@ class P2PHandler:
         Args:
             inference_result (InferenceResult): The result object of the local peer's inference.
         """
-        operations = Operations(chunk_size=self.packet_size)
-        serialized_data = operations.serialize(inference_result)
-        await self.publish_objects(serialized_data)
+        serialized_data = self.operations.serialize(inference_result)
+        await self.publish_objects(serialized_data)'''
 
     async def publish_objects(self, serialized_data: List[bytes], delay: float = 0.1):
         """
@@ -145,13 +200,14 @@ class P2PHandler:
             await asyncio.sleep(delay)
         await libp2p.publish_message(b'end')
 
-    '''async def subscribe_to_messages(self):
+    async def subscribe_to_messages(self):
         def callback_wrapper(message):
             self.message_dispatcher(message)
         
-        await libp2p.subscribe_to_messages(callback_wrapper)'''
+        await libp2p.subscribe_to_messages(callback_wrapper)
+        logging.info("Subscribed to messages")
 
-    async def subscribe_to_messages(self):
+    '''async def subscribe_to_messages(self):
         def callback_wrapper(message):
             try:
                 self.message_dispatcher(message)
@@ -163,7 +219,7 @@ class P2PHandler:
         except EOFError as e:
             print(f"EOFError during message subscription: {e}")
         except Exception as e:
-            print(f"General error during message subscription: {e}")
+            print(f"General error during message subscription: {e}")'''
 
     async def start_listening(self):
         """
@@ -197,15 +253,17 @@ class P2PHandler:
         network state accordingly. The method ensures accurate reflection of peer statuses and results in the 
         network's overall state based on incoming data.
         """
-        operations = Operations()
-        data_object = operations.deserialize([self.message_buffer])
-        if isinstance(data_object, PeerStatus):
-            self.handle_peer_status_update(data_object)
-        elif isinstance(data_object, InferenceRequest):
-            self.handle_inference_request_update(data_object)
-        elif isinstance(data_object, InferenceResult):
-            self.handle_inference_result_update(data_object)
-        self.message_buffer.clear()
+        try:
+            data_object = self.operations.deserialize([self.message_buffer])
+            if isinstance(data_object, PeerStatus):
+                self.handle_peer_status_update(data_object)
+            elif isinstance(data_object, InferenceRequest):
+                self.handle_inference_request_update(data_object)
+            elif isinstance(data_object, InferenceResult):
+                self.handle_inference_result_update(data_object)
+            self.message_buffer.clear()
+        except Exception as e:
+            logging.error(f"Error processing complete message: {e}")
 
     def handle_peer_status_update(self, peer_status: PeerStatus):
         """
@@ -214,16 +272,17 @@ class P2PHandler:
         the current state of each peer within the network, facilitating coordinated actions and decisions.
         """
         self.network_state.update_peer_status(peer_status)
-        print(f"PeerStatus updated for {peer_status.peer_id}: {peer_status.status}")
+        logging.info(f"PeerStatus updated for {peer_status.peer_id}: {peer_status.status}")
 
     def handle_inference_request_update(self, inference_request: InferenceRequest):
         """
         Handles the update of a peer's inference request. After an inference request message is fully received and processed, 
         this function triggers the processing of the received sample on the local peer.
         """
-        print(f"InferenceRequest received from {inference_request.peer_id}")
-        asyncio.create_task(self.process_inference_request(inference_request))
-        #self.process_inference_request(inference_request)
+        logging.info(f"InferenceRequest received from {inference_request.peer_id}")
+        self.inference_requests.append(inference_request)
+        self.network_state.update_inference_request(inference_request)
+        logging.info(f"Added inference request to queue. Queue size: {len(self.inference_requests)}")
 
     def handle_inference_result_update(self, inference_result: InferenceResult):
         """
@@ -231,10 +290,12 @@ class P2PHandler:
         this function updates the network state with the new result of the peer. This action is vital for the 
         distributed inference process, allowing the network to collectively utilize the results based on peer contributions.
         """
+        self.inference_results[inference_result.peer_id] = inference_result
         self.network_state.update_inference_result(inference_result)
-        print(f"InferenceResult updated for {inference_result.peer_id}.")
+        #self.result_queue.put_nowait(inference_result)
+        logging.info(f"InferenceResult get it from {inference_result.peer_id}")
 
-    async def process_inference_request(self, inference_request: InferenceRequest):
+    '''async def process_inference_request(self, inference_request: InferenceRequest):
         try:
             sample = inference_request.sample
             peer_id = inference_request.peer_id
@@ -266,7 +327,7 @@ class P2PHandler:
                 await self.publish_status(self.local_peer_status)
             await asyncio.sleep(10)
         except Exception as e:
-            print(f"Error processing inference request: {e}")
+            print(f"Error processing inference request: {e}")'''
 
 
     async def get_peers(self):
@@ -299,12 +360,12 @@ class P2PHandler:
             - Continuously checks for the number of connected peers and updates their statuses.
             - Proceeds once the minimum number of peers is connected.
         """
-        print(f"Waiting for at least {min_peers} peers to connect...")
+        logging.info(f"Waiting for at least {min_peers} peers to connect...")
         while True:
             current_peers = await self.get_peers()
             if len(current_peers) >= min_peers:
-                print(f"Connected peers: {len(current_peers)}. Proceeding.")   
+                logging.info(f"Connected peers: {len(current_peers)}. Proceeding.")
                 break
             else:
-                print(f"Connected peers: {len(current_peers)}. Waiting...")
+                logging.info(f"Connected peers: {len(current_peers)}. Waiting...")
                 await asyncio.sleep(check_interval)
