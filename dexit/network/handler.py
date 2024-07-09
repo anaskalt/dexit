@@ -109,7 +109,7 @@ class P2PHandler:
         await self.publish_objects(serialized_data)
         logging.info(f"Published status: {peer_status.status}")
 
-    async def send_direct_message(self, peer_id, serialized_data: List[bytes], delay: float = 0.1):
+    async def send_direct_message(self, peer_id, serialized_data: List[bytes], delay: float = 0.01):
         logging.info(f"Sending direct message to {peer_id} (size: {sum(len(chunk) for chunk in serialized_data)} bytes)")
         await libp2p.send_direct_message(peer_id, b'start')
         for chunk in serialized_data:
@@ -125,7 +125,7 @@ class P2PHandler:
                 request = self.inference_requests.pop(0)
                 logging.info(f"Retrieved inference request from {request.peer_id}")
                 return request
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
         logging.warning(f"Inference request wait timed out after {timeout} seconds")
         return None
 
@@ -134,7 +134,7 @@ class P2PHandler:
         while asyncio.get_event_loop().time() - start_time < timeout:
             if peer_id in self.inference_results:
                 return self.inference_results.pop(peer_id)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
         logging.warning(f"Inference result wait timed out after {timeout} seconds")
         return None
 
@@ -182,7 +182,7 @@ class P2PHandler:
         serialized_data = self.operations.serialize(inference_result)
         await self.publish_objects(serialized_data)'''
 
-    async def publish_objects(self, serialized_data: List[bytes], delay: float = 0.1):
+    async def publish_objects(self, serialized_data: List[bytes], delay: float = 0.01):
         """
         Publishes serialized data objects (PeerStatus, InferenceRequest, or InferenceResult) to the P2P network.
 

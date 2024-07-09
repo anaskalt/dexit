@@ -88,9 +88,10 @@ class InferenceRequest:
 
 class InferenceResult:
     """Represents the result of an inference."""
-    def __init__(self, peer_id: str, result):
+    def __init__(self, peer_id: str, result, exit_point: str):
         self._peer_id = peer_id
         self._result = result
+        self._exit_point = exit_point
 
     @property
     def peer_id(self) -> str:
@@ -112,6 +113,14 @@ class InferenceResult:
         """Sets the result."""
         self._result = value
 
+    @property
+    def exit_point(self) -> str:
+        return self._exit_point
+
+    @exit_point.setter
+    def exit_point(self, value):
+        """Sets the exit_point."""
+        self._exit_point = value
 
 class NetworkState:
     """Encapsulates the network state, managing statuses and inference results of all peers."""

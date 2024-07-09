@@ -15,7 +15,7 @@ import torch
 import configparser
 import matplotlib.pyplot as plt
 
-from dexit.utils.state import Status, PeerStatus, InferenceRequest, InferenceResult
+from dexit.utils.state import Status, InferenceRequest, InferenceResult
 from dexit.network.handler import P2PHandler
 from dexit.data.dataloaders import CIFARDataLoader
 #from dexit.early_exit.early_exit import * 
@@ -27,8 +27,50 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 ATTEMPTS = 3
 torch.autograd.set_detect_anomaly(True)
 # Ensure the metrics directory exists
-METRICS_DIR = '../metrics'
-os.makedirs(METRICS_DIR, exist_ok=True)
+PLOTS_DIR = '../plots'
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+def generate_plots(accuracy, exit_counts, class_correct, class_total):
+    exit_distribution_filename = f'{PLOTS_DIR}/exit_distribution.png'
+    class_accuracy_filename = f'{PLOTS_DIR}/class_accuracy.png'
+    cumulative_accuracy_filename = f'{PLOTS_DIR}/cumulative_accuracy.png'
+
+    # Plot 1: Exit Distribution
+    plt.figure(figsize=(10, 5))
+    plt.bar(exit_counts.keys(), exit_counts.values())
+    plt.title('Distribution of Exits')
+    plt.xlabel('Exit Point')
+    plt.ylabel('Number of Samples')
+    plt.savefig(exit_distribution_filename)
+    plt.close()
+
+    # Plot 2: Accuracy by Class
+    class_accuracy = {cls: class_correct[cls] / class_total[cls] for cls in class_total.keys()}
+    plt.figure(figsize=(12, 6))
+    plt.bar(class_accuracy.keys(), class_accuracy.values())
+    plt.title('Accuracy by Class')
+    plt.xlabel('Class')
+    plt.ylabel('Accuracy')
+    plt.ylim(0, 1)
+    plt.savefig(class_accuracy_filename)
+    plt.close()
+
+    # Plot 3: Exit Point vs Accuracy
+    total_samples = sum(exit_counts.values())
+    cumulative_samples = 0
+    cumulative_accuracy = []
+    for exit_point, count in exit_counts.items():
+        cumulative_samples += count
+        cumulative_accuracy.append(accuracy * (cumulative_samples / total_samples))
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(list(exit_counts.keys()), cumulative_accuracy, marker='o')
+    plt.title('Cumulative Accuracy vs Exit Point')
+    plt.xlabel('Exit Point')
+    plt.ylabel('Cumulative Accuracy')
+    plt.ylim(0, 1)
+    plt.savefig(cumulative_accuracy_filename)
+    plt.close()
 
 def load_configuration():
     config = configparser.ConfigParser()
@@ -51,11 +93,6 @@ def load_model(path, device):
         logging.error(f"Error loading model from {path}: {str(e)}")
         return None
 
-'''def load_configuration():
-    config = configparser.ConfigParser()
-    config.read('conf/node.conf')
-    return config'''
-
 async def setup_p2p_network(config, models, device):
     p2p_handler = P2PHandler(
         bootnodes=config['P2P']['bootnodes'].split(','),
@@ -68,19 +105,28 @@ async def setup_p2p_network(config, models, device):
     )
     return p2p_handler
 
-def print_network_state(p2p_handler):
-    logging.info("Current Network State:")
-    for peer_id, info in p2p_handler.network_state.peer_statuses.items():
-        logging.info(f"Peer ID: {peer_id}, Role: {info['role']}, Status: {info['status']}")
+async def perform_edge_inference(p2p_handler, timeout, device, num_samples=None):
+    dataloader = CIFARDataLoader(num_samples=num_samples).get_test_loader()
+    correct_samples = 0
+    total_samples = 0
+    exit_counts = {'edge': 0, 'cloud1': 0, 'cloud2': 0}
+    class_correct = {i: 0 for i in range(10)}
+    class_total = {i: 0 for i in range(10)}
 
-async def perform_edge_inference(p2p_handler, timeout, device):
-    dataloader = CIFARDataLoader().get_loader()
-    for data, _ in dataloader:
+    for data, labels in dataloader:
         batch = data.to(device)
-        for sample in batch:
+        labels = labels.to(device)
+        
+        for i in range(batch.shape[0]):
+            total_samples += 1
+            sample = batch[i]
+            
             output, exit_taken = p2p_handler.models['edge_device'](sample)
             
-            if not exit_taken:
+            if exit_taken:
+                exit_counts['edge'] += 1
+                exit_point = 'edge'
+            else:
                 cloud1_peer_id = p2p_handler.network_state.get_peer_by_role('cloud1')
                 if cloud1_peer_id:
                     inference_request = InferenceRequest(peer_id=p2p_handler.local_peer_id, sample=output)
@@ -89,12 +135,30 @@ async def perform_edge_inference(p2p_handler, timeout, device):
                     result = await p2p_handler.wait_for_inference_result(peer_id=p2p_handler.local_peer_id, timeout=timeout)
                     if result:
                         output = result.result
+                        exit_point = result.exit_point
+                        exit_counts[exit_point] += 1
                     else:
                         logging.warning("Cloud1 inference timeout")
+                        exit_point = 'timeout'
                 else:
                     logging.warning("Cloud1 peer not found")
+                    exit_point = 'error'
             
-            logging.info(f"Final output shape: {output.shape}")
+            prediction = torch.argmax(output)
+            correct = (prediction == labels[i]).item()
+            class_correct[labels[i].item()] += correct
+            class_total[labels[i].item()] += 1
+            
+            if correct:
+                correct_samples += 1
+            
+            logging.info(f"Sample {total_samples}: Prediction: {prediction.item()}, Actual: {labels[i].item()}, Correct: {correct}, Exit: {exit_point}")
+    
+    accuracy = correct_samples / total_samples
+    logging.info(f"Final accuracy: {accuracy:.4f}")
+    logging.info(f"Exit counts: {exit_counts}")
+    
+    return accuracy, exit_counts, class_correct, class_total
 
 async def perform_cloud1_inference(p2p_handler, config, device):
     while True:
@@ -103,16 +167,21 @@ async def perform_cloud1_inference(p2p_handler, config, device):
             sample = inference_request.sample.to(device)
             output, exit_taken = p2p_handler.models['cloud1'](sample)
             
-            result = InferenceResult(peer_id=inference_request.peer_id, result=output)
-            await p2p_handler.send_inference_result(inference_request.peer_id, result)
-            
-            if not exit_taken:
+            if exit_taken:
+                exit_point = 'cloud1'
+            else:
+                exit_point = 'cloud2'
                 cloud2_peer_id = p2p_handler.network_state.get_peer_by_role('cloud2')
                 if cloud2_peer_id:
                     new_request = InferenceRequest(peer_id=inference_request.peer_id, sample=output)
                     await p2p_handler.send_inference_request(cloud2_peer_id, new_request)
+                    logging.info("Request forwarded to Cloud2")
+                    continue  # Don't send result back to edge yet
                 else:
                     logging.warning("Cloud2 peer not found")
+            
+            result = InferenceResult(peer_id=inference_request.peer_id, result=output, exit_point=exit_point)
+            await p2p_handler.send_inference_result(inference_request.peer_id, result)
         else:
             await asyncio.sleep(0.1)
 
@@ -123,7 +192,7 @@ async def perform_cloud2_inference(p2p_handler, config, device):
             sample = inference_request.sample.to(device)
             output, _ = p2p_handler.models['cloud2'](sample)
             
-            result = InferenceResult(peer_id=inference_request.peer_id, result=output)
+            result = InferenceResult(peer_id=inference_request.peer_id, result=output, exit_point='cloud2')
             await p2p_handler.send_inference_result(inference_request.peer_id, result)
         else:
             await asyncio.sleep(0.1)
@@ -159,12 +228,11 @@ async def main():
                                         check_interval=int(config['P2P']['wait_for_peers_interval']))
 
         asyncio.create_task(p2p_handler.subscribe_to_messages())
-        #await p2p_handler.start_listening()
 
         role = config['ROLE']['role']
         timeout = int(config['P2P']['infernece_timeout'])
+        num_test_samples = int(config['DATASET']['num_samples'])
 
-        #p2p_handler.local_peer_status = PeerStatus(p2p_handler.local_peer_id, Status.READY, role)
         for _ in range(ATTEMPTS):
             await p2p_handler.publish_status(p2p_handler.local_peer_status)
         await asyncio.sleep(10)
@@ -175,10 +243,11 @@ async def main():
             await p2p_handler.publish_status(p2p_handler.local_peer_status)
         await asyncio.sleep(10)
 
-        #await p2p_handler.publish_status(p2p_handler.local_peer_status)
 
         if role == 'edge':
-            await perform_edge_inference(p2p_handler, timeout, device)
+            accuracy, exit_counts, class_correct, class_total = await perform_edge_inference(p2p_handler, timeout, device, num_samples=num_test_samples)
+            generate_plots(accuracy, exit_counts, class_correct, class_total)
+            #await perform_edge_inference(p2p_handler, timeout, device, num_samples=num_test_samples)
         elif role == 'cloud1':
             await perform_cloud1_inference(p2p_handler, config, device)
         elif role == 'cloud2':
