@@ -30,6 +30,7 @@ Requirements
 - PyTorch
 - asyncio
 - tqdm
+- git-lfs
 
 Installation
 ------------
@@ -46,6 +47,18 @@ Installation
    .. code-block:: bash
 
       pip install -r requirements.txt
+
+3. Install git-lfs:
+
+   .. code-block:: bash
+
+      sudo apt install git-lfs
+
+4. Pull models:
+
+   .. code-block:: bash
+
+      git lfs pull
 
 Configuration
 -------------
