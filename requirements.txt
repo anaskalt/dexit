@@ -4,4 +4,4 @@ torchvision
 numpy
 scikit-learn
 matplotlib
-#libp2p-pyrust
+libp2p-pyrust
